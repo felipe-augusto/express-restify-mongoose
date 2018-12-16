@@ -6,6 +6,7 @@ const util = require('util')
 const Filter = require('./resource_filter')
 let customDefaults = null
 const excludedMap = {}
+const includedMap = {}
 
 function getDefaults() {
   return defaults(Object.assign({}, customDefaults) || {}, {
@@ -19,8 +20,67 @@ function getDefaults() {
     runValidators: false,
     allowRegex: true,
     private: [],
-    protected: []
+    protected: [],
+    writePrivate: [],
+    writeProtected: []
   })
+}
+
+function traverse(schema, options, mode = 'read', prefix = '') {
+  // resolve paths
+  const isRead = (mode == 'read')
+  const objectPaths = {
+    option: isRead ? 'access' : 'writeAccess',
+    private: isRead ? 'private': 'writePrivate',
+    protected: isRead ? 'protected' : 'writeProtected'
+  }
+
+  const paths = []
+
+  schema.eachPath(function (name, path) {
+    if(path.instance == 'Array' || path.instance == 'Embedded') {
+      paths.push(...traverse(path.schema, options, mode, `${prefix + name}.`))
+      return
+    }
+
+    if (path.options[objectPaths.option]) {
+      switch (path.options[objectPaths.option].toLowerCase()) {
+        case 'private':
+          options[objectPaths.private].push(prefix + name)
+          break
+        case 'protected':
+          options[objectPaths.protected].push(prefix + name)
+          break
+      }
+    }
+  })
+
+  return paths
+}
+
+function writeAccess(options) {
+  const errorHandler = require('./errorHandler')(options)
+
+  return function (req, res, next) {
+    const handler = function (err, access) {
+      if (err) {
+        return errorHandler(req, res, next)(err)
+      }
+
+      if (['public', 'private', 'protected'].indexOf(access) < 0) {
+        throw new Error('Unsupported access, must be "private", "protected" or "public"')
+      }
+
+      req.writeAccess = access
+      next()
+    }
+
+    if (options.writeAccess.length > 1) {
+      options.writeAccess(req, handler)
+    } else {
+      handler(null, options.writeAccess(req))
+    }
+  }
 }
 
 const restify = function(app, model, opts) {
@@ -33,6 +93,23 @@ const restify = function(app, model, opts) {
   const outputFn = require('./middleware/outputFn')
   const prepareQuery = require('./middleware/prepareQuery')(options)
   const prepareOutput = require('./middleware/prepareOutput')(options, excludedMap)
+  const prepareInput = (function (options, includedMap) {
+    const errorHandler = require('./errorHandler')(options)
+    return function (req, res, next) {
+      if (req.body) {
+        const opts = {
+          access: req.writeAccess,
+          excludedMap: includedMap,
+          populate: null
+        }
+
+        req.body = options.writeFilter ? options.writeFilter.filterObject(req.body, opts) : req.body
+      }
+
+      console.log('filtered body', req.body)
+      next()
+    }
+  })(options, includedMap)
 
   if (!Array.isArray(options.private)) {
     throw new Error('"options.private" must be an array of fields')
@@ -42,18 +119,8 @@ const restify = function(app, model, opts) {
     throw new Error('"options.protected" must be an array of fields')
   }
 
-  model.schema.eachPath((name, path) => {
-    if (path.options.access) {
-      switch (path.options.access.toLowerCase()) {
-        case 'private':
-          options.private.push(name)
-          break
-        case 'protected':
-          options.protected.push(name)
-          break
-      }
-    }
-  })
+  traverse(model.schema, options, 'read')
+  traverse(model.schema, options, 'write')
 
   options.filter = new Filter({
     model,
@@ -64,7 +131,17 @@ const restify = function(app, model, opts) {
     }
   })
 
+  options.writeFilter = new Filter({
+    model,
+    includedMap,
+    filteredKeys: {
+      private: options.writePrivate,
+      protected: options.writeProtected,
+    }
+  })
+
   excludedMap[model.modelName] = options.filter.filteredKeys
+  includedMap[model.modelName] = options.writeFilter.filteredKeys
 
   options.preMiddleware = ensureArray(options.preMiddleware)
   options.preCreate = ensureArray(options.preCreate)
@@ -117,17 +194,18 @@ const restify = function(app, model, opts) {
   })
 
   const accessMiddleware = options.access ? access(options) : []
+  const writeAccessMiddleware = options.writeAccess ? writeAccess(options) : []
 
   app.get(uriItems, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getItems, prepareOutput)
   app.get(uriCount, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getCount, prepareOutput)
   app.get(uriItem, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getItem, prepareOutput)
   app.get(uriShallow, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getShallow, prepareOutput)
 
-  app.post(uriItems, prepareQuery, ensureContentType, options.preMiddleware, options.preCreate, accessMiddleware, ops.createObject, prepareOutput)
-  app.post(uriItem, util.deprecate(prepareQuery, 'express-restify-mongoose: in a future major version, the POST method to update resources will be removed. Use PATCH instead.'), ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
+  app.post(uriItems, writeAccessMiddleware, prepareInput, prepareQuery, ensureContentType, options.preMiddleware, options.preCreate, accessMiddleware, ops.createObject, prepareOutput)
+  app.post(uriItem, writeAccessMiddleware, prepareInput, util.deprecate(prepareQuery, 'express-restify-mongoose: in a future major version, the POST method to update resources will be removed. Use PATCH instead.'), ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
 
-  app.put(uriItem, util.deprecate(prepareQuery, 'express-restify-mongoose: in a future major version, the PUT method will replace rather than update a resource. Use PATCH instead.'), ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
-  app.patch(uriItem, prepareQuery, ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
+  app.put(uriItem, writeAccessMiddleware, prepareInput, util.deprecate(prepareQuery, 'express-restify-mongoose: in a future major version, the PUT method will replace rather than update a resource. Use PATCH instead.'), ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
+  app.patch(uriItem, writeAccessMiddleware, prepareInput, prepareQuery, ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
 
   app.delete(uriItems, prepareQuery, options.preMiddleware, options.preDelete, ops.deleteItems, prepareOutput)
   app.delete(uriItem, prepareQuery, options.preMiddleware, options.findOneAndRemove ? [] : filterAndFindById, options.preDelete, ops.deleteItem, prepareOutput)
