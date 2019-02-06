@@ -1,6 +1,7 @@
 'use strict'
 
 const defaults = require('lodash.defaults')
+const mongoose = require('mongoose')
 const ensureArray = require('ensure-array')
 const util = require('util')
 const Filter = require('./resource_filter')
@@ -26,7 +27,7 @@ function getDefaults() {
   })
 }
 
-function traverse(schema, options, mode = 'read', prefix = '') {
+function traverse(schema, options, mode = 'read', prefix = '', visited = []) {
   // resolve paths
   const isRead = (mode == 'read')
   const objectPaths = {
@@ -37,7 +38,19 @@ function traverse(schema, options, mode = 'read', prefix = '') {
 
   const paths = []
 
-  schema.eachPath(function (name, path) {
+  schema && schema.eachPath(function (name, path) {
+    // refs to another model (i.e: populate)
+    if(path.options.ref) {
+      const refModel = mongoose.model(path.options.ref)
+      
+      if(!visited.includes(refModel.modelName)) {
+        visited.push(refModel.modelName)
+        traverse(refModel.schema, options, 'read', `${prefix + name}.`, visited)
+        traverse(refModel.schema, options, 'write', `${prefix + name}.`, visited)
+      }
+    }
+
+
     if(path.instance == 'Array' || path.instance == 'Embedded') {
       paths.push(...traverse(path.schema, options, mode, `${prefix + name}.`))
       return
