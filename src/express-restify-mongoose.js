@@ -23,50 +23,51 @@ function getDefaults() {
     private: [],
     protected: [],
     writePrivate: [],
-    writeProtected: []
+    writeProtected: [],
+    only: ['get', 'list', 'create', 'update', 'delete']
   })
 }
 
 function traverse(schema, options, mode = 'read', prefix = '', visited = []) {
   // resolve paths
-  const isRead = (mode == 'read')
+  const isRead = mode == 'read'
   const objectPaths = {
     option: isRead ? 'access' : 'writeAccess',
-    private: isRead ? 'private': 'writePrivate',
+    private: isRead ? 'private' : 'writePrivate',
     protected: isRead ? 'protected' : 'writeProtected'
   }
 
   const paths = []
 
-  schema && schema.eachPath(function (name, path) {
-    // refs to another model (i.e: populate)
-    if(path.options.ref) {
-      const refModel = mongoose.model(path.options.ref)
-      
-      if(!visited.includes(refModel.modelName)) {
-        visited.push(refModel.modelName)
-        traverse(refModel.schema, options, 'read', `${prefix + name}.`, visited)
-        traverse(refModel.schema, options, 'write', `${prefix + name}.`, visited)
+  schema &&
+    schema.eachPath(function(name, path) {
+      // refs to another model (i.e: populate)
+      if (path.options.ref) {
+        const refModel = mongoose.model(path.options.ref)
+
+        if (!visited.includes(refModel.modelName)) {
+          visited.push(refModel.modelName)
+          traverse(refModel.schema, options, 'read', `${prefix + name}.`, visited)
+          traverse(refModel.schema, options, 'write', `${prefix + name}.`, visited)
+        }
       }
-    }
 
-
-    if(path.instance == 'Array' || path.instance == 'Embedded') {
-      paths.push(...traverse(path.schema, options, mode, `${prefix + name}.`))
-      return
-    }
-
-    if (path.options[objectPaths.option]) {
-      switch (path.options[objectPaths.option].toLowerCase()) {
-        case 'private':
-          options[objectPaths.private].push(prefix + name)
-          break
-        case 'protected':
-          options[objectPaths.protected].push(prefix + name)
-          break
+      if (path.instance == 'Array' || path.instance == 'Embedded') {
+        paths.push(...traverse(path.schema, options, mode, `${prefix + name}.`))
+        return
       }
-    }
-  })
+
+      if (path.options[objectPaths.option]) {
+        switch (path.options[objectPaths.option].toLowerCase()) {
+          case 'private':
+            options[objectPaths.private].push(prefix + name)
+            break
+          case 'protected':
+            options[objectPaths.protected].push(prefix + name)
+            break
+        }
+      }
+    })
 
   return paths
 }
@@ -74,8 +75,8 @@ function traverse(schema, options, mode = 'read', prefix = '', visited = []) {
 function writeAccess(options) {
   const errorHandler = require('./errorHandler')(options)
 
-  return function (req, res, next) {
-    const handler = function (err, access) {
+  return function(req, res, next) {
+    const handler = function(err, access) {
       if (err) {
         return errorHandler(req, res, next)(err)
       }
@@ -106,9 +107,9 @@ const restify = function(app, model, opts) {
   const outputFn = require('./middleware/outputFn')
   const prepareQuery = require('./middleware/prepareQuery')(options)
   const prepareOutput = require('./middleware/prepareOutput')(options, excludedMap)
-  const prepareInput = (function (options, includedMap) {
+  const prepareInput = (function(options, includedMap) {
     const errorHandler = require('./errorHandler')(options)
-    return function (req, res, next) {
+    return function(req, res, next) {
       if (req.body) {
         const opts = {
           access: req.writeAccess,
@@ -149,7 +150,7 @@ const restify = function(app, model, opts) {
     includedMap,
     filteredKeys: {
       private: options.writePrivate,
-      protected: options.writeProtected,
+      protected: options.writeProtected
     }
   })
 
@@ -209,19 +210,32 @@ const restify = function(app, model, opts) {
   const accessMiddleware = options.access ? access(options) : []
   const writeAccessMiddleware = options.writeAccess ? writeAccess(options) : []
 
-  app.get(uriItems, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getItems, prepareOutput)
-  app.get(uriCount, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getCount, prepareOutput)
-  app.get(uriItem, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getItem, prepareOutput)
-  app.get(uriShallow, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getShallow, prepareOutput)
+  options.only = ensureArray(options.only)
 
-  app.post(uriItems, writeAccessMiddleware, prepareInput, prepareQuery, ensureContentType, options.preMiddleware, options.preCreate, accessMiddleware, ops.createObject, prepareOutput)
-  app.post(uriItem, writeAccessMiddleware, prepareInput, util.deprecate(prepareQuery, 'express-restify-mongoose: in a future major version, the POST method to update resources will be removed. Use PATCH instead.'), ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
+  if (options.only.includes('list')) {
+    app.get(uriItems, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getItems, prepareOutput)
+    app.get(uriCount, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getCount, prepareOutput)
+  }
 
-  app.put(uriItem, writeAccessMiddleware, prepareInput, util.deprecate(prepareQuery, 'express-restify-mongoose: in a future major version, the PUT method will replace rather than update a resource. Use PATCH instead.'), ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
-  app.patch(uriItem, writeAccessMiddleware, prepareInput, prepareQuery, ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
+  if (options.only.includes('get')) {
+    app.get(uriItem, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getItem, prepareOutput)
+    app.get(uriShallow, prepareQuery, options.preMiddleware, options.preRead, accessMiddleware, ops.getShallow, prepareOutput)
+  }
 
-  app.delete(uriItems, prepareQuery, options.preMiddleware, options.preDelete, ops.deleteItems, prepareOutput)
-  app.delete(uriItem, prepareQuery, options.preMiddleware, options.findOneAndRemove ? [] : filterAndFindById, options.preDelete, ops.deleteItem, prepareOutput)
+  if (options.only.includes('create')) {
+    app.post(uriItems, writeAccessMiddleware, prepareInput, prepareQuery, ensureContentType, options.preMiddleware, options.preCreate, accessMiddleware, ops.createObject, prepareOutput)
+    app.post(uriItem, writeAccessMiddleware, prepareInput, util.deprecate(prepareQuery, 'express-restify-mongoose: in a future major version, the POST method to update resources will be removed. Use PATCH instead.'), ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
+  }
+
+  if (options.only.includes('update')) {
+    app.put(uriItem, writeAccessMiddleware, prepareInput, util.deprecate(prepareQuery, 'express-restify-mongoose: in a future major version, the PUT method will replace rather than update a resource. Use PATCH instead.'), ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
+    app.patch(uriItem, writeAccessMiddleware, prepareInput, prepareQuery, ensureContentType, options.preMiddleware, options.findOneAndUpdate ? [] : filterAndFindById, options.preUpdate, accessMiddleware, ops.modifyObject, prepareOutput)
+  }
+
+  if (options.only.includes('delete')) {
+    app.delete(uriItems, prepareQuery, options.preMiddleware, options.preDelete, ops.deleteItems, prepareOutput)
+    app.delete(uriItem, prepareQuery, options.preMiddleware, options.findOneAndRemove ? [] : filterAndFindById, options.preDelete, ops.deleteItem, prepareOutput)
+  }
 
   return uriItems
 }
